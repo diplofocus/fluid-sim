@@ -1,27 +1,27 @@
 use std::f64::consts::PI;
 
-use graphics::{color, ellipse, line, Context, Transformed, Viewport};
+use graphics::{color, ellipse, Context, Transformed, Viewport};
 use kdtree::KdTree;
 use opengl_graphics::GlGraphics;
 use rayon::{iter, prelude::*};
 extern crate nalgebra as na;
 
-const NUM_PARTICLES: usize = 500;
+const NUM_PARTICLES: usize = 1000;
 const PARTICLE_RADIUS: f64 = 4.;
 
-const GRAVITY: V2 = na::Vector2::new(0., 0.);
+const GRAVITY: V2 = na::Vector2::new(0., 0.1);
 
 const SMOOTHING_RADIUS: f64 = 60.;
 
-const TIME_STEP: f64 = 5.;
+const TIME_STEP: f64 = 20.;
 
 const COLLISSION_DAMPING: f64 = 0.85;
 const DAMPING_DISTANCE: f64 = 5.;
 
-const TARGET_DENSITY: f64 = 1.;
+const TARGET_DENSITY: f64 = 1.005;
 // const TARGET_DENSITY: f64 = 0.1;
 // const PRESSURE_MULTIPLIER: f64 = 100.;
-const PRESSURE_MULTIPLIER: f64 = 50.;
+const PRESSURE_MULTIPLIER: f64 = 5000000.;
 
 #[derive(Debug, Clone)]
 pub struct SimulationState {
@@ -78,13 +78,14 @@ impl SimulationState {
             .into_iter()
             .zip(0..self.particles.len())
             .map(|(particle, index)| {
-                let r = na::Vector4::from(color::YELLOW) * (particle.density * 1500.) as f32;
-                let b = na::Vector4::from(color::BLUE) * ((1. - particle.density) * 100.) as f32;
+                let r = na::Vector4::from(color::BLUE)
+                    * ((particle.density - TARGET_DENSITY).abs() / 3.0 - 0.5) as f32;
+                let b = na::Vector4::from(color::GREEN);
                 ellipse(
                     if index == 1 {
                         graphics::color::LIME
                     } else {
-                        (r + b).into()
+                        ((r + b) + na::Vector4::from([0., 0., 0., 1.])).into()
                     },
                     circle,
                     context
@@ -148,7 +149,7 @@ impl SimulationState {
             .update(|particle: &mut Particle| {
                 let particles_to_consider = kdtree
                     .within(
-                        &[particle.position.x, particle.position.y],
+                        &[particle.predicted_position.x, particle.predicted_position.y],
                         SMOOTHING_RADIUS.powi(2),
                         &kdtree::distance::squared_euclidean,
                     )
@@ -157,12 +158,8 @@ impl SimulationState {
                     .map(|p| **p.1)
                     .collect::<Vec<Particle>>();
                 let pressure_force = get_pressure_force(&particles_to_consider, &particle);
-                let pressure_acceleration = if particle.density.abs() > 0.0001 {
-                    pressure_force / particle.density
-                } else {
-                    na::Vector2::zeros()
-                };
-                particle.velocity += pressure_acceleration.cap_magnitude(50.) * dt * TIME_STEP;
+                let pressure_acceleration = pressure_force / particle.density;
+                particle.velocity += pressure_acceleration * dt * TIME_STEP;
             })
             .update(|particle| {
                 particle.position += particle.velocity * dt * TIME_STEP;
@@ -177,21 +174,20 @@ impl SimulationState {
 }
 
 fn get_pressure_from_density(density: f64) -> f64 {
-    let density_error = density - TARGET_DENSITY;
-    let pressure = density_error * PRESSURE_MULTIPLIER;
-    pressure
+    (density - TARGET_DENSITY) * PRESSURE_MULTIPLIER
 }
 
 fn get_density(particles: &Vec<Particle>, particle: &Particle) -> f64 {
-    particles
-        .into_par_iter()
-        .map(|other_particle| {
-            let distance =
-                (other_particle.predicted_position - particle.predicted_position).magnitude();
-            let influence = smoothing_kernel(distance, SMOOTHING_RADIUS);
-            other_particle.mass * influence
-        })
-        .sum()
+    particle.mass
+        + particles
+            .into_par_iter()
+            .map(|other_particle| {
+                let distance =
+                    (other_particle.predicted_position - particle.predicted_position).magnitude();
+                let influence = smoothing_kernel(distance, SMOOTHING_RADIUS);
+                other_particle.mass * influence
+            })
+            .sum::<f64>()
 }
 
 fn get_pressure_force(particles: &Vec<Particle>, particle: &Particle) -> V2 {
@@ -207,7 +203,7 @@ fn get_pressure_force(particles: &Vec<Particle>, particle: &Particle) -> V2 {
                     (other_particle.predicted_position - particle.predicted_position) / distance;
                 let slope = smoothing_kernel_prime(distance, SMOOTHING_RADIUS);
                 let shared_pressure = get_shared_pressure_force(other_particle, particle);
-                -shared_pressure * direction * slope * other_particle.mass
+                shared_pressure * direction * slope * other_particle.mass
             }
         })
         .sum()
