@@ -1,11 +1,11 @@
-use std::{array, f64::consts::PI};
+use std::f64::consts::PI;
 
 use graphics::{color, ellipse, line, Context, Transformed, Viewport};
 use opengl_graphics::GlGraphics;
-use rayon::prelude::*;
+use rayon::{iter, prelude::*};
 extern crate nalgebra as na;
 
-const NUM_PARTICLES: usize = 300;
+const NUM_PARTICLES: usize = 500;
 const PARTICLE_RADIUS: f64 = 6.;
 
 const GRAVITY: na::Vector2<f64> = na::Vector2::new(0., 0.);
@@ -18,11 +18,12 @@ const COLLISSION_DAMPING: f64 = 0.85;
 
 const TARGET_DENSITY: f64 = 2.75;
 // const TARGET_DENSITY: f64 = 0.1;
-const PRESSURE_MULTIPLIER: f64 = 100.;
+// const PRESSURE_MULTIPLIER: f64 = 100.;
+const PRESSURE_MULTIPLIER: f64 = 1000.;
 
 #[derive(Debug, Clone)]
 pub struct SimulationState {
-    pub particles: [Particle; NUM_PARTICLES],
+    pub particles: Vec<Particle>,
     viewport: Viewport,
 }
 
@@ -37,23 +38,22 @@ pub struct Particle {
 
 impl SimulationState {
     pub fn new(viewport: Viewport) -> Self {
-        // let center = viewport.window_size[0] / 2.;
-        // let start = center - SPACING * STARTING_COLUMNS as f64 / 2.;
         SimulationState {
             viewport,
-            particles: array::from_fn(|_| {
-                let x = rand::random::<f64>() * viewport.window_size[0];
-                let y = rand::random::<f64>() * viewport.window_size[1];
-                // let x = start + ((index % STARTING_COLUMNS) as f64 * SPACING);
-                // let y = START_Y + (index / STARTING_COLUMNS) as f64 * SPACING;
-                Particle {
-                    position: na::Vector2::new(x, y),
-                    velocity: na::Vector2::zeros(),
-                    mass: 1.,
-                    density: 0.,
-                    density_gradient: na::Vector2::zeros(),
-                }
-            }),
+            particles: iter::repeat(())
+                .take(NUM_PARTICLES)
+                .map(|_| {
+                    let x = rand::random::<f64>() * viewport.window_size[0];
+                    let y = rand::random::<f64>() * viewport.window_size[1];
+                    Particle {
+                        position: na::Vector2::new(x, y),
+                        velocity: na::Vector2::zeros(),
+                        mass: 1.,
+                        density: 0.,
+                        density_gradient: na::Vector2::zeros(),
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -64,30 +64,50 @@ impl SimulationState {
 
     pub fn draw(&self, context: Context, gl: &mut GlGraphics) {
         let circle = graphics::ellipse::circle(0., 0., PARTICLE_RADIUS);
-        self.particles.map(|particle| {
-            let r = na::Vector4::from(color::YELLOW) * (particle.density * 1500.) as f32;
-            let b = na::Vector4::from(color::BLUE) * ((1. - particle.density) * 100.) as f32;
-            line(
-                color::WHITE,
-                5.,
-                [
-                    0.,
-                    0.,
-                    particle.density_gradient[0] * 100.,
-                    particle.density_gradient[1] * 100.,
-                ],
-                context.transform.trans_pos(particle.position),
-                gl,
-            );
-            ellipse(
-                (r + b).into(),
-                circle,
-                context
-                    .transform
-                    .trans_pos::<[f64; 2]>(particle.position.into()),
-                gl,
-            );
-        });
+        let smoothing_circle = graphics::ellipse::circle(0., 0., SMOOTHING_RADIUS);
+        self.particles
+            .to_vec()
+            .into_iter()
+            .zip(0..self.particles.len())
+            .map(|(particle, index)| {
+                let r = na::Vector4::from(color::YELLOW) * (particle.density * 1500.) as f32;
+                let b = na::Vector4::from(color::BLUE) * ((1. - particle.density) * 100.) as f32;
+                line(
+                    color::WHITE,
+                    5.,
+                    [
+                        0.,
+                        0.,
+                        particle.density_gradient[0] * 100.,
+                        particle.density_gradient[1] * 100.,
+                    ],
+                    context.transform.trans_pos(particle.position),
+                    gl,
+                );
+                ellipse(
+                    if index == 1 {
+                        graphics::color::LIME
+                    } else {
+                        (r + b).into()
+                    },
+                    circle,
+                    context
+                        .transform
+                        .trans_pos::<[f64; 2]>(particle.position.into()),
+                    gl,
+                );
+                if index == 1 {
+                    ellipse(
+                        graphics::color::alpha(0.2),
+                        smoothing_circle,
+                        context
+                            .transform
+                            .trans_pos::<[f64; 2]>(particle.position.into()),
+                        gl,
+                    )
+                }
+            })
+            .collect()
     }
 
     pub fn update(&mut self, dt: f64) {
@@ -101,6 +121,7 @@ impl SimulationState {
         let mut update_buffer: Vec<Particle> = Vec::new();
 
         self.particles
+            .to_vec()
             .into_par_iter()
             .update(|particle: &mut Particle| {
                 let updated_velocity = particle.velocity + GRAVITY * dt * TIME_STEP;
@@ -136,7 +157,7 @@ fn get_pressure_from_density(density: f64) -> f64 {
     pressure
 }
 
-fn get_density(particles: &[Particle; NUM_PARTICLES], particle: &Particle) -> f64 {
+fn get_density(particles: &Vec<Particle>, particle: &Particle) -> f64 {
     particles
         .into_par_iter()
         .map(|other_particle| {
@@ -151,10 +172,7 @@ fn get_density(particles: &[Particle; NUM_PARTICLES], particle: &Particle) -> f6
         .sum()
 }
 
-fn get_pressure_force(
-    particles: &[Particle; NUM_PARTICLES],
-    particle: &Particle,
-) -> na::Vector2<f64> {
+fn get_pressure_force(particles: &Vec<Particle>, particle: &Particle) -> na::Vector2<f64> {
     particles
         .into_par_iter()
         .map(|other_particle| {
