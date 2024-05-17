@@ -139,7 +139,7 @@ impl SimulationState {
                 let particles_to_consider = kdtree
                     .within(
                         &[particle.position.x, particle.position.y],
-                        SMOOTHING_RADIUS,
+                        SMOOTHING_RADIUS.powi(2),
                         &kdtree::distance::squared_euclidean,
                     )
                     .unwrap()
@@ -156,14 +156,8 @@ impl SimulationState {
                 let particles_to_consider = kdtree
                     .within(
                         &[particle.position.x, particle.position.y],
-                        SMOOTHING_RADIUS,
-                        &|a, b| {
-                            a.into_iter()
-                                .zip(b.into_iter())
-                                .map(|(a, b)| (a - b).powi(2))
-                                .sum::<f64>()
-                                .sqrt()
-                        },
+                        SMOOTHING_RADIUS.powi(2),
+                        &kdtree::distance::squared_euclidean,
                     )
                     .unwrap()
                     .iter()
