@@ -1,6 +1,7 @@
 use std::f64::consts::PI;
 
 use graphics::{color, ellipse, line, Context, Transformed, Viewport};
+use kdtree::KdTree;
 use opengl_graphics::GlGraphics;
 use rayon::{iter, prelude::*};
 extern crate nalgebra as na;
@@ -10,7 +11,7 @@ const PARTICLE_RADIUS: f64 = 6.;
 
 const GRAVITY: na::Vector2<f64> = na::Vector2::new(0., 0.);
 
-const SMOOTHING_RADIUS: f64 = 90.;
+const SMOOTHING_RADIUS: f64 = 120.;
 
 const TIME_STEP: f64 = 5.;
 
@@ -27,7 +28,7 @@ pub struct SimulationState {
     viewport: Viewport,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Particle {
     pub position: na::Vector2<f64>,
     pub velocity: na::Vector2<f64>,
@@ -35,6 +36,8 @@ pub struct Particle {
     density: f64,
     density_gradient: na::Vector2<f64>,
 }
+
+type ParticleKdTree<'a> = KdTree<f64, &'a Particle, [f64; 2]>;
 
 impl SimulationState {
     pub fn new(viewport: Viewport) -> Self {
@@ -120,18 +123,53 @@ impl SimulationState {
 
         let mut update_buffer: Vec<Particle> = Vec::new();
 
+        let mut kdtree: ParticleKdTree = KdTree::new(2);
+        self.particles
+            .iter()
+            .map(|p| {
+                kdtree.add(p.position.into(), &p).unwrap();
+            })
+            .for_each(drop);
+
         self.particles
             .to_vec()
             .into_par_iter()
             .update(|particle: &mut Particle| {
                 let updated_velocity = particle.velocity + GRAVITY * dt * TIME_STEP;
-                let density = get_density(&self.particles, &particle);
+                let particles_to_consider = kdtree
+                    .within(
+                        &[particle.position.x, particle.position.y],
+                        SMOOTHING_RADIUS,
+                        &kdtree::distance::squared_euclidean,
+                    )
+                    .unwrap()
+                    .iter()
+                    .map(|p| **p.1)
+                    .collect::<Vec<Particle>>();
+
+                let density = get_density(&particles_to_consider, &particle);
 
                 particle.velocity = updated_velocity;
                 particle.density = density;
             })
             .update(|particle: &mut Particle| {
-                let pressure_force = get_pressure_force(&self.particles, &particle);
+                let particles_to_consider = kdtree
+                    .within(
+                        &[particle.position.x, particle.position.y],
+                        SMOOTHING_RADIUS,
+                        &|a, b| {
+                            a.into_iter()
+                                .zip(b.into_iter())
+                                .map(|(a, b)| (a - b).powi(2))
+                                .sum::<f64>()
+                                .sqrt()
+                        },
+                    )
+                    .unwrap()
+                    .iter()
+                    .map(|p| **p.1)
+                    .collect::<Vec<Particle>>();
+                let pressure_force = get_pressure_force(&particles_to_consider, &particle);
                 let pressure_acceleration = if particle.density > 0. {
                     pressure_force / particle.density
                 } else {
