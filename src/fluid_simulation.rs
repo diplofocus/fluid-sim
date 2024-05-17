@@ -7,20 +7,21 @@ use rayon::{iter, prelude::*};
 extern crate nalgebra as na;
 
 const NUM_PARTICLES: usize = 500;
-const PARTICLE_RADIUS: f64 = 6.;
+const PARTICLE_RADIUS: f64 = 4.;
 
-const GRAVITY: na::Vector2<f64> = na::Vector2::new(0., 0.);
+const GRAVITY: V2 = na::Vector2::new(0., 0.);
 
-const SMOOTHING_RADIUS: f64 = 120.;
+const SMOOTHING_RADIUS: f64 = 60.;
 
 const TIME_STEP: f64 = 5.;
 
 const COLLISSION_DAMPING: f64 = 0.85;
+const DAMPING_DISTANCE: f64 = 5.;
 
-const TARGET_DENSITY: f64 = 2.75;
+const TARGET_DENSITY: f64 = 1.;
 // const TARGET_DENSITY: f64 = 0.1;
 // const PRESSURE_MULTIPLIER: f64 = 100.;
-const PRESSURE_MULTIPLIER: f64 = 1000.;
+const PRESSURE_MULTIPLIER: f64 = 50.;
 
 #[derive(Debug, Clone)]
 pub struct SimulationState {
@@ -28,13 +29,16 @@ pub struct SimulationState {
     viewport: Viewport,
 }
 
+type V2 = na::Vector2<f64>;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Particle {
-    pub position: na::Vector2<f64>,
-    pub velocity: na::Vector2<f64>,
+    pub position: V2,
+    pub velocity: V2,
     mass: f64,
     density: f64,
-    density_gradient: na::Vector2<f64>,
+    density_gradient: V2,
+    predicted_position: V2,
 }
 
 type ParticleKdTree<'a> = KdTree<f64, &'a Particle, [f64; 2]>;
@@ -49,8 +53,9 @@ impl SimulationState {
                     let x = rand::random::<f64>() * viewport.window_size[0];
                     let y = rand::random::<f64>() * viewport.window_size[1];
                     Particle {
-                        position: na::Vector2::new(x, y),
-                        velocity: na::Vector2::zeros(),
+                        position: V2::new(x, y),
+                        velocity: V2::zeros(),
+                        predicted_position: V2::zeros(),
                         mass: 1.,
                         density: 0.,
                         density_gradient: na::Vector2::zeros(),
@@ -75,18 +80,6 @@ impl SimulationState {
             .map(|(particle, index)| {
                 let r = na::Vector4::from(color::YELLOW) * (particle.density * 1500.) as f32;
                 let b = na::Vector4::from(color::BLUE) * ((1. - particle.density) * 100.) as f32;
-                line(
-                    color::WHITE,
-                    5.,
-                    [
-                        0.,
-                        0.,
-                        particle.density_gradient[0] * 100.,
-                        particle.density_gradient[1] * 100.,
-                    ],
-                    context.transform.trans_pos(particle.position),
-                    gl,
-                );
                 ellipse(
                     if index == 1 {
                         graphics::color::LIME
@@ -124,12 +117,9 @@ impl SimulationState {
         let mut update_buffer: Vec<Particle> = Vec::new();
 
         let mut kdtree: ParticleKdTree = KdTree::new(2);
-        self.particles
-            .iter()
-            .map(|p| {
-                kdtree.add(p.position.into(), &p).unwrap();
-            })
-            .for_each(drop);
+        for particle in &self.particles {
+            kdtree.add(particle.position.into(), &particle).unwrap()
+        }
 
         self.particles
             .to_vec()
@@ -151,6 +141,9 @@ impl SimulationState {
 
                 particle.velocity = updated_velocity;
                 particle.density = density;
+                // Constant time step due to inconsitent behaviour at different framerates
+                particle.predicted_position =
+                    particle.position + updated_velocity * TIME_STEP / 120.;
             })
             .update(|particle: &mut Particle| {
                 let particles_to_consider = kdtree
@@ -164,12 +157,12 @@ impl SimulationState {
                     .map(|p| **p.1)
                     .collect::<Vec<Particle>>();
                 let pressure_force = get_pressure_force(&particles_to_consider, &particle);
-                let pressure_acceleration = if particle.density > 0. {
+                let pressure_acceleration = if particle.density.abs() > 0.0001 {
                     pressure_force / particle.density
                 } else {
                     na::Vector2::zeros()
                 };
-                particle.velocity += pressure_acceleration * dt * TIME_STEP;
+                particle.velocity += pressure_acceleration.cap_magnitude(50.) * dt * TIME_STEP;
             })
             .update(|particle| {
                 particle.position += particle.velocity * dt * TIME_STEP;
@@ -193,26 +186,25 @@ fn get_density(particles: &Vec<Particle>, particle: &Particle) -> f64 {
     particles
         .into_par_iter()
         .map(|other_particle| {
-            let distance = (other_particle.position - particle.position).magnitude();
-            if particle.position.eq(&other_particle.position) {
-                0.
-            } else {
-                let influence = smoothing_kernel(distance, SMOOTHING_RADIUS);
-                other_particle.mass * influence
-            }
+            let distance =
+                (other_particle.predicted_position - particle.predicted_position).magnitude();
+            let influence = smoothing_kernel(distance, SMOOTHING_RADIUS);
+            other_particle.mass * influence
         })
         .sum()
 }
 
-fn get_pressure_force(particles: &Vec<Particle>, particle: &Particle) -> na::Vector2<f64> {
+fn get_pressure_force(particles: &Vec<Particle>, particle: &Particle) -> V2 {
     particles
         .into_par_iter()
         .map(|other_particle| {
-            let distance = (other_particle.position - particle.position).magnitude();
-            if particle.position.eq(&other_particle.position) || distance.lt(&5.) {
+            let distance =
+                (other_particle.predicted_position - particle.predicted_position).magnitude();
+            if distance < DAMPING_DISTANCE {
                 na::Vector2::zeros()
             } else {
-                let direction = (other_particle.position - particle.position) / distance;
+                let direction =
+                    (other_particle.predicted_position - particle.predicted_position) / distance;
                 let slope = smoothing_kernel_prime(distance, SMOOTHING_RADIUS);
                 let shared_pressure = get_shared_pressure_force(other_particle, particle);
                 -shared_pressure * direction * slope * other_particle.mass
@@ -225,11 +217,7 @@ fn get_shared_pressure_force(first: &Particle, second: &Particle) -> f64 {
     (get_pressure_from_density(first.density) + get_pressure_from_density(second.density)) / 2.
 }
 
-fn handle_boundaries(
-    position: &mut na::Vector2<f64>,
-    velocity: &mut na::Vector2<f64>,
-    boundaries: [f64; 4],
-) {
+fn handle_boundaries(position: &mut V2, velocity: &mut V2, boundaries: [f64; 4]) {
     if position.x > (boundaries[0] + boundaries[2] - PARTICLE_RADIUS)
         || position.x < PARTICLE_RADIUS
     {

@@ -39,7 +39,7 @@ impl App {
             // Clear the screen.
             clear(graphics::color::BLACK, gl);
             self.simulation_state.draw(c, gl);
-            render_ui(&mut self.glyphs, c, gl);
+            // render_ui(&mut self.glyphs, c, gl);
         });
     }
 
