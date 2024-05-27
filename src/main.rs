@@ -6,6 +6,9 @@ extern crate graphics;
 extern crate opengl_graphics;
 extern crate piston;
 
+use std::iter;
+
+use fluid_simulation::{Particle, V2};
 use glutin_window::GlutinWindow as Window;
 use graphics::glyph_cache::rusttype::GlyphCache;
 use graphics::Viewport;
@@ -17,17 +20,18 @@ use piston::window::WindowSettings;
 use crate::fluid_simulation::SimulationState;
 use crate::ui::render_ui;
 
+const NUM_PARTICLES: usize = 1000;
 const FONT_PATH: &str = ".\\assets\\roboto.ttf";
 const VIEWPORT_WIDTH: u32 = 1024;
 const VIEWPORT_HEIGHT: u32 = 768;
-pub struct App {
+pub struct App<'a> {
     gl: GlGraphics, // OpenGL drawing backend.
-    simulation_state: SimulationState,
+    simulation_state: SimulationState<'a>,
     glyphs: GlyphCache<'static, (), Texture>,
     viewport: Viewport,
 }
 
-impl App {
+impl App<'a> {
     fn render(&mut self, args: &RenderArgs) {
         use graphics::*;
 
@@ -69,11 +73,27 @@ fn main() {
         window_size: [VIEWPORT_WIDTH as f64, VIEWPORT_HEIGHT as f64],
     };
 
+    let mut particles: Vec<Particle> = iter::repeat(())
+        .take(NUM_PARTICLES)
+        .map(|_| {
+            let x = rand::random::<f64>() * default_viewport.window_size[0];
+            let y = rand::random::<f64>() * default_viewport.window_size[1];
+            Particle {
+                position: V2::new(x, y),
+                velocity: V2::zeros(),
+                predicted_position: V2::zeros(),
+                mass: 1.,
+                density: 0.,
+                density_gradient: V2::zeros(),
+            }
+        })
+        .collect();
+
     // Create a new game and run it.
     let mut app = App {
         gl: GlGraphics::new(opengl),
         viewport: default_viewport,
-        simulation_state: SimulationState::new(default_viewport),
+        simulation_state: SimulationState::new(default_viewport, particles.iter_mut().collect()),
         glyphs,
     };
 

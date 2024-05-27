@@ -6,7 +6,6 @@ use opengl_graphics::GlGraphics;
 use rayon::{iter, prelude::*};
 extern crate nalgebra as na;
 
-const NUM_PARTICLES: usize = 1000;
 const PARTICLE_RADIUS: f64 = 4.;
 
 const GRAVITY: V2 = na::Vector2::new(0., 0.1);
@@ -23,45 +22,31 @@ const TARGET_DENSITY: f64 = 1.005;
 // const PRESSURE_MULTIPLIER: f64 = 100.;
 const PRESSURE_MULTIPLIER: f64 = 5000000.;
 
-#[derive(Debug, Clone)]
-pub struct SimulationState {
-    pub particles: Vec<Particle>,
+#[derive(Debug)]
+pub struct SimulationState<'a> {
+    pub particles: Vec<&'a mut Particle>,
     viewport: Viewport,
 }
 
-type V2 = na::Vector2<f64>;
+pub type V2 = na::Vector2<f64>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Particle {
     pub position: V2,
     pub velocity: V2,
-    mass: f64,
-    density: f64,
-    density_gradient: V2,
-    predicted_position: V2,
+    pub mass: f64,
+    pub density: f64,
+    pub density_gradient: V2,
+    pub predicted_position: V2,
 }
 
 type ParticleKdTree<'a> = KdTree<f64, &'a Particle, [f64; 2]>;
 
-impl SimulationState {
-    pub fn new(viewport: Viewport) -> Self {
+impl<'a> SimulationState<'a> {
+    pub fn new(viewport: Viewport, particles: Vec<&'a mut Particle>) -> Self {
         SimulationState {
             viewport,
-            particles: iter::repeat(())
-                .take(NUM_PARTICLES)
-                .map(|_| {
-                    let x = rand::random::<f64>() * viewport.window_size[0];
-                    let y = rand::random::<f64>() * viewport.window_size[1];
-                    Particle {
-                        position: V2::new(x, y),
-                        velocity: V2::zeros(),
-                        predicted_position: V2::zeros(),
-                        mass: 1.,
-                        density: 0.,
-                        density_gradient: na::Vector2::zeros(),
-                    }
-                })
-                .collect(),
+            particles,
         }
     }
 
@@ -74,10 +59,9 @@ impl SimulationState {
         let circle = graphics::ellipse::circle(0., 0., PARTICLE_RADIUS);
         let smoothing_circle = graphics::ellipse::circle(0., 0., SMOOTHING_RADIUS);
         self.particles
-            .to_vec()
-            .into_iter()
-            .zip(0..self.particles.len())
-            .map(|(particle, index)| {
+            .iter()
+            .enumerate()
+            .map(|(index, particle)| {
                 let r = na::Vector4::from(color::BLUE)
                     * ((particle.density - TARGET_DENSITY).abs() / 3.0 - 0.5) as f32;
                 let b = na::Vector4::from(color::GREEN);
@@ -115,17 +99,14 @@ impl SimulationState {
             self.viewport.window_size[1],
         ];
 
-        let mut update_buffer: Vec<Particle> = Vec::new();
-
         let mut kdtree: ParticleKdTree = KdTree::new(2);
         for particle in &self.particles {
-            kdtree.add(particle.position.into(), &particle).unwrap()
+            kdtree.add(particle.position.into(), *particle).unwrap()
         }
 
         self.particles
-            .to_vec()
-            .into_par_iter()
-            .update(|particle: &mut Particle| {
+            .par_iter_mut()
+            .update(|particle| {
                 let updated_velocity = particle.velocity + GRAVITY * dt * TIME_STEP;
                 let particles_to_consider = kdtree
                     .within(
@@ -140,13 +121,13 @@ impl SimulationState {
 
                 let density = get_density(&particles_to_consider, &particle);
 
-                particle.velocity = updated_velocity;
+                particle.velocity = updated_velocity.cast();
                 particle.density = density;
                 // Constant time step due to inconsitent behaviour at different framerates
                 particle.predicted_position =
                     particle.position + updated_velocity * TIME_STEP / 120.;
             })
-            .update(|particle: &mut Particle| {
+            .update(|particle| {
                 let particles_to_consider = kdtree
                     .within(
                         &[particle.predicted_position.x, particle.predicted_position.y],
@@ -164,12 +145,7 @@ impl SimulationState {
             .update(|particle| {
                 particle.position += particle.velocity * dt * TIME_STEP;
                 handle_boundaries(&mut particle.position, &mut particle.velocity, boundaries);
-            })
-            .collect_into_vec(&mut update_buffer);
-
-        self.particles = update_buffer
-            .try_into()
-            .expect("Failed to convert updated particles into array");
+            });
     }
 }
 
